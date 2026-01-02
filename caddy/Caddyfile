@@ -1,0 +1,80 @@
+# Developer Tools Stack - Caddy Configuration
+# Automatic HTTPS with Let's Encrypt (production) or self-signed (localhost)
+
+{
+	# Global options
+	email {$SSL_EMAIL}
+}
+
+# Dashboard - Root domain
+{$BASE_DOMAIN} {
+	root * /srv/dashboard
+	file_server
+	encode gzip
+}
+
+# GitLab - DevOps Platform
+{$GITLAB_SUBDOMAIN}.{$BASE_DOMAIN} {
+	reverse_proxy gitlab:8080 {
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Forwarded-Host {host}
+		transport http {
+			read_timeout 300s
+		}
+	}
+}
+
+# Portainer - Docker Management UI
+{$PORTAINER_SUBDOMAIN}.{$BASE_DOMAIN} {
+	reverse_proxy portainer:9000
+}
+
+# Harbor - Enterprise Container Registry
+{$HARBOR_SUBDOMAIN}.{$BASE_DOMAIN} {
+	# API and Registry requests go to core
+	reverse_proxy /api/* harbor-core:8080
+	reverse_proxy /service/* harbor-core:8080
+	reverse_proxy /v2/* harbor-core:8080
+	reverse_proxy /chartrepo/* harbor-core:8080
+	reverse_proxy /c/* harbor-core:8080
+	
+	# Portal (Web UI) is the default
+	reverse_proxy harbor-portal:8080
+}
+
+# Nextcloud - Cloud Storage
+{$NEXTCLOUD_SUBDOMAIN}.{$BASE_DOMAIN} {
+	reverse_proxy nextcloud:80 {
+		header_up X-Forwarded-Proto {scheme}
+	}
+	request_body {
+		max_size 0
+	}
+}
+
+# n8n - Workflow Automation
+{$N8N_SUBDOMAIN}.{$BASE_DOMAIN} {
+	reverse_proxy n8n:5678
+}
+
+# Jenkins - CI/CD
+{$JENKINS_SUBDOMAIN}.{$BASE_DOMAIN} {
+	reverse_proxy jenkins:8080 {
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Forwarded-Host {host}
+		transport http {
+			read_timeout 300s
+		}
+	}
+}
+
+# Homarr - Dashboard
+{$HOMARR_SUBDOMAIN}.{$BASE_DOMAIN} {
+	reverse_proxy homarr:7575
+}
+
+# Mosquitto - MQTT Broker (WebSocket)
+{$MOSQUITTO_SUBDOMAIN}.{$BASE_DOMAIN} {
+	reverse_proxy mosquitto:9001
+}
+

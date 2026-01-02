@@ -1,0 +1,541 @@
+services:
+  # Caddy - Reverse Proxy with automatic HTTPS
+  caddy:
+    build:
+      context: ./caddy
+      dockerfile: Dockerfile
+    container_name: caddy
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - BASE_DOMAIN=${BASE_DOMAIN:-localhost}
+      - SSL_EMAIL=${SSL_EMAIL:-admin@localhost}
+      - GITLAB_SUBDOMAIN=${GITLAB_SUBDOMAIN:-gitlab}
+      - PORTAINER_SUBDOMAIN=${PORTAINER_SUBDOMAIN:-portainer}
+      - HARBOR_SUBDOMAIN=${HARBOR_SUBDOMAIN:-harbor}
+      - NEXTCLOUD_SUBDOMAIN=${NEXTCLOUD_SUBDOMAIN:-nextcloud}
+      - N8N_SUBDOMAIN=${N8N_SUBDOMAIN:-n8n}
+      - JENKINS_SUBDOMAIN=${JENKINS_SUBDOMAIN:-jenkins}
+      - HOMARR_SUBDOMAIN=${HOMARR_SUBDOMAIN:-homarr}
+      - MOSQUITTO_SUBDOMAIN=${MOSQUITTO_SUBDOMAIN:-mqtt}
+      - TZ=${TZ:-UTC}
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./harbor/config:/harbor-config
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - devtools-network
+    restart: unless-stopped
+    depends_on:
+      - gitlab
+      - portainer
+      - harbor-portal
+      - nextcloud
+      - n8n
+      - jenkins
+      - homarr
+      - mosquitto
+
+  # GitLab - Complete DevOps Platform
+  gitlab:
+    image: gitlab/gitlab-ce:latest
+    container_name: gitlab
+    hostname: ${GITLAB_SUBDOMAIN:-gitlab}.${BASE_DOMAIN:-localhost}
+    environment:
+      GITLAB_OMNIBUS_CONFIG: |
+        external_url 'https://${GITLAB_SUBDOMAIN:-gitlab}.${BASE_DOMAIN:-localhost}'
+        nginx['enable'] = false
+        gitlab_workhorse['listen_network'] = "tcp"
+        gitlab_workhorse['listen_addr'] = "0.0.0.0:8080"
+        gitlab_rails['gitlab_shell_ssh_port'] = ${GITLAB_SSH_PORT:-2222}
+        gitlab_rails['initial_root_password'] = '${GITLAB_ROOT_PASSWORD:-ChangeThisPassword123!}'
+        prometheus_monitoring['enable'] = false
+        gitlab_rails['smtp_enable'] = false
+        gitlab_rails['backup_keep_time'] = 604800
+        puma['worker_processes'] = 2
+        puma['port'] = 8181
+        sidekiq['max_concurrency'] = 10
+      TZ: ${TZ:-UTC}
+    ports:
+      - "${GITLAB_SSH_PORT:-2222}:22"
+    volumes:
+      - gitlab_config:/etc/gitlab
+      - gitlab_logs:/var/log/gitlab
+      - gitlab_data:/var/opt/gitlab
+    shm_size: '256m'
+    networks:
+      - devtools-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/-/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+  # Portainer - Docker Management UI
+  portainer:
+    image: portainer/portainer-ce:latest
+    container_name: portainer
+    command: -H unix:///var/run/docker.sock
+    environment:
+      TZ: ${TZ:-UTC}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer_data:/data
+    networks:
+      - devtools-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9000/api/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ============================================
+  # Harbor - Enterprise Container Registry
+  # ============================================
+  
+  # Harbor PostgreSQL Database
+  harbor-db:
+    image: goharbor/harbor-db:v2.11.2
+    container_name: harbor-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${HARBOR_DB_PASSWORD:-HarborDB123!}
+      TZ: ${TZ:-UTC}
+    volumes:
+      - harbor_db:/var/lib/postgresql/data
+    networks:
+      - devtools-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Harbor Redis Cache
+  harbor-redis:
+    image: goharbor/redis-photon:v2.11.2
+    container_name: harbor-redis
+    environment:
+      TZ: ${TZ:-UTC}
+    volumes:
+      - harbor_redis:/var/lib/redis
+    networks:
+      - devtools-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Harbor Registry (Docker Distribution)
+  harbor-registry:
+    image: goharbor/registry-photon:v2.11.2
+    container_name: harbor-registry
+    environment:
+      TZ: ${TZ:-UTC}
+    volumes:
+      - harbor_registry:/storage
+      - ./harbor/config/registry:/etc/registry:ro
+    networks:
+      - devtools-network
+    depends_on:
+      - harbor-redis
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Harbor Registryctl
+  harbor-registryctl:
+    image: goharbor/harbor-registryctl:v2.11.2
+    container_name: harbor-registryctl
+    environment:
+      CORE_SECRET: ${HARBOR_CORE_SECRET:-harbor_core_secret_change_this}
+      TZ: ${TZ:-UTC}
+    volumes:
+      - harbor_registry:/storage
+      - ./harbor/config/registry:/etc/registry:ro
+      - ./harbor/config/registryctl:/etc/registryctl:ro
+    networks:
+      - devtools-network
+    depends_on:
+      - harbor-registry
+    restart: unless-stopped
+
+  # Harbor Core
+  harbor-core:
+    image: goharbor/harbor-core:v2.11.2
+    container_name: harbor-core
+    environment:
+      CORE_KEY: ${HARBOR_CORE_KEY:-harbor_core_key_change_this_12345}
+      CORE_SECRET: ${HARBOR_CORE_SECRET:-harbor_core_secret_change_this}
+      JOBSERVICE_SECRET: ${HARBOR_JOBSERVICE_SECRET:-harbor_jobservice_secret_change_this}
+      _REDIS_URL_CORE: redis://harbor-redis:6379/0
+      SYNC_QUOTA: "true"
+      CHART_CACHE_DRIVER: redis
+      _REDIS_URL_REG: redis://harbor-redis:6379/1
+      PORTAL_URL: http://harbor-portal:8080
+      REGISTRY_URL: http://harbor-registry:5000
+      TOKEN_SERVICE_URL: http://harbor-core:8080/service/token
+      CORE_URL: http://harbor-core:8080
+      CORE_LOCAL_URL: http://127.0.0.1:8080
+      JOBSERVICE_URL: http://harbor-jobservice:8080
+      TRIVY_ADAPTER_URL: http://harbor-trivy:8080
+      REGISTRY_STORAGE_PROVIDER_NAME: filesystem
+      LOG_LEVEL: info
+      CONFIG_PATH: /etc/core/app.conf
+      PERMITTED_REGISTRY_TYPES_FOR_PROXY_CACHE: docker-hub,harbor,azure-acr,aws-ecr,google-gcr,quay,docker-registry,github-ghcr,jfrog-artifactory
+      # Database connection
+      DATABASE_TYPE: postgresql
+      POSTGRESQL_HOST: harbor-db
+      POSTGRESQL_PORT: 5432
+      POSTGRESQL_USERNAME: postgres
+      POSTGRESQL_PASSWORD: ${HARBOR_DB_PASSWORD:-HarborDB123!}
+      POSTGRESQL_DATABASE: registry
+      POSTGRESQL_SSLMODE: disable
+      EXT_ENDPOINT: https://${HARBOR_SUBDOMAIN:-harbor}.${BASE_DOMAIN:-localhost}
+      HARBOR_ADMIN_PASSWORD: ${HARBOR_ADMIN_PASSWORD:-Harbor12345!}
+      WITH_TRIVY: "true"
+      TZ: ${TZ:-UTC}
+    volumes:
+      - harbor_core:/data
+      - ./harbor/config/core:/etc/core:ro
+    networks:
+      - devtools-network
+    depends_on:
+      - harbor-db
+      - harbor-redis
+      - harbor-registry
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/v2.0/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # Harbor Portal (Web UI)
+  harbor-portal:
+    image: goharbor/harbor-portal:v2.11.2
+    container_name: harbor-portal
+    environment:
+      TZ: ${TZ:-UTC}
+    volumes:
+      - ./harbor/config/portal/nginx.conf:/etc/nginx/nginx.conf:ro
+    tmpfs:
+      - /var/run:uid=10000,gid=10000
+    networks:
+      - devtools-network
+    depends_on:
+      - harbor-core
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:8080/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Harbor Jobservice
+  harbor-jobservice:
+    image: goharbor/harbor-jobservice:v2.11.2
+    container_name: harbor-jobservice
+    environment:
+      CORE_SECRET: ${HARBOR_CORE_SECRET:-harbor_core_secret_change_this}
+      JOBSERVICE_SECRET: ${HARBOR_JOBSERVICE_SECRET:-harbor_jobservice_secret_change_this}
+      CORE_URL: http://harbor-core:8080
+      REGISTRY_URL: http://harbor-registry:5000
+      REGISTRY_CONTROLLER_URL: http://harbor-registryctl:8080
+      TOKEN_SERVICE_URL: http://harbor-core:8080/service/token
+      _REDIS_URL_CORE: redis://harbor-redis:6379/0
+      TZ: ${TZ:-UTC}
+    volumes:
+      - harbor_job_logs:/var/log/jobs
+      - ./harbor/config/jobservice:/etc/jobservice:ro
+    networks:
+      - devtools-network
+    depends_on:
+      harbor-core:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/v1/stats"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # Harbor Trivy Adapter (Vulnerability Scanner)
+  harbor-trivy:
+    image: goharbor/trivy-adapter-photon:v2.11.2
+    container_name: harbor-trivy
+    user: root
+    environment:
+      SCANNER_LOG_LEVEL: info
+      SCANNER_TRIVY_CACHE_DIR: /home/scanner/.cache/trivy
+      SCANNER_TRIVY_REPORTS_DIR: /home/scanner/.cache/reports
+      SCANNER_TRIVY_VULN_TYPE: os,library
+      SCANNER_TRIVY_SEVERITY: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+      SCANNER_TRIVY_GITHUB_TOKEN: ""
+      SCANNER_REDIS_URL: redis://harbor-redis:6379/5
+      SCANNER_STORE_REDIS_URL: redis://harbor-redis:6379/5
+      SCANNER_JOB_QUEUE_REDIS_URL: redis://harbor-redis:6379/5
+      TZ: ${TZ:-UTC}
+    volumes:
+      - harbor_trivy:/home/scanner/.cache
+    networks:
+      - devtools-network
+    depends_on:
+      - harbor-redis
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/probe/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+
+  # Nextcloud - Cloud Storage & Collaboration Platform
+  nextcloud-db:
+    image: mariadb:10.11
+    container_name: nextcloud-db
+    command: --transaction-isolation=READ-COMMITTED --log-bin=binlog --binlog-format=ROW
+    environment:
+      MYSQL_ROOT_PASSWORD: ${NEXTCLOUD_DB_PASSWORD:-NextcloudDB123!}
+      MYSQL_DATABASE: nextcloud
+      MYSQL_USER: nextcloud
+      MYSQL_PASSWORD: ${NEXTCLOUD_DB_PASSWORD:-NextcloudDB123!}
+      TZ: ${TZ:-UTC}
+    volumes:
+      - nextcloud_db:/var/lib/mysql
+    networks:
+      - devtools-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  nextcloud-redis:
+    image: redis:7-alpine
+    container_name: nextcloud-redis
+    command: redis-server --requirepass ${NEXTCLOUD_REDIS_PASSWORD:-NextcloudRedis123!}
+    environment:
+      TZ: ${TZ:-UTC}
+    volumes:
+      - nextcloud_redis:/data
+    networks:
+      - devtools-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  nextcloud:
+    image: nextcloud:latest
+    container_name: nextcloud
+    environment:
+      MYSQL_HOST: nextcloud-db
+      MYSQL_DATABASE: nextcloud
+      MYSQL_USER: nextcloud
+      MYSQL_PASSWORD: ${NEXTCLOUD_DB_PASSWORD:-NextcloudDB123!}
+      REDIS_HOST: nextcloud-redis
+      REDIS_HOST_PASSWORD: ${NEXTCLOUD_REDIS_PASSWORD:-NextcloudRedis123!}
+      NEXTCLOUD_ADMIN_USER: ${NEXTCLOUD_ADMIN_USER:-admin}
+      NEXTCLOUD_ADMIN_PASSWORD: ${NEXTCLOUD_ADMIN_PASSWORD:-NextcloudAdmin123!}
+      NEXTCLOUD_TRUSTED_DOMAINS: ${NEXTCLOUD_SUBDOMAIN:-nextcloud}.${BASE_DOMAIN:-localhost}
+      OVERWRITEPROTOCOL: https
+      OVERWRITEHOST: ${NEXTCLOUD_SUBDOMAIN:-nextcloud}.${BASE_DOMAIN:-localhost}
+      TZ: ${TZ:-UTC}
+    volumes:
+      - nextcloud_data:/var/www/html
+      - nextcloud_apps:/var/www/html/custom_apps
+      - nextcloud_config:/var/www/html/config
+    networks:
+      - devtools-network
+    depends_on:
+      - nextcloud-db
+      - nextcloud-redis
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/status.php"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Mosquitto - MQTT Broker
+  mosquitto:
+    image: eclipse-mosquitto:latest
+    container_name: mosquitto
+    entrypoint: ["/entrypoint.sh"]
+    ports:
+      - "1883:1883"   # MQTT TCP
+      - "8883:8883"   # MQTT TLS (if configured)
+    environment:
+      MOSQUITTO_USERNAME: ${MOSQUITTO_USERNAME:-mqttadmin}
+      MOSQUITTO_PASSWORD: ${MOSQUITTO_PASSWORD:-MqttAdmin123!}
+      TZ: ${TZ:-UTC}
+    volumes:
+      - ./mosquitto/entrypoint.sh:/entrypoint.sh:ro
+      - ./mosquitto/config/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto_data:/mosquitto/data
+      - mosquitto_logs:/mosquitto/log
+      - mosquitto_passwd:/mosquitto/passwd
+    networks:
+      - devtools-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mosquitto_sub", "-t", "$$SYS/#", "-C", "1", "-i", "healthcheck", "-u", "${MOSQUITTO_USERNAME:-mqttadmin}", "-P", "${MOSQUITTO_PASSWORD:-MqttAdmin123!}", "-W", "3"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # n8n - Workflow Automation
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: n8n
+    environment:
+      N8N_BASIC_AUTH_ACTIVE: "true"
+      N8N_BASIC_AUTH_USER: ${N8N_BASIC_AUTH_USER:-admin}
+      N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD:-n8nAdmin123!}
+      N8N_HOST: ${N8N_SUBDOMAIN:-n8n}.${BASE_DOMAIN:-localhost}
+      N8N_PORT: 5678
+      N8N_PROTOCOL: https
+      WEBHOOK_URL: https://${N8N_SUBDOMAIN:-n8n}.${BASE_DOMAIN:-localhost}/
+      GENERIC_TIMEZONE: ${TZ:-UTC}
+      DB_TYPE: sqlite
+      DB_SQLITE_DATABASE: /home/node/.n8n/database.sqlite
+      EXECUTIONS_MODE: regular
+      EXECUTIONS_DATA_SAVE_ON_ERROR: all
+      EXECUTIONS_DATA_SAVE_ON_SUCCESS: all
+      EXECUTIONS_DATA_SAVE_MANUAL_EXECUTIONS: "true"
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:-n8n_encryption_key_change_this}
+      TZ: ${TZ:-UTC}
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - n8n_files:/files
+    networks:
+      - devtools-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:5678/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # Jenkins - CI/CD Automation Server
+  jenkins:
+    image: jenkins/jenkins:lts-jdk17
+    container_name: jenkins
+    user: root
+    environment:
+      JENKINS_OPTS: "--prefix=/"
+      JAVA_OPTS: "-Djenkins.install.runSetupWizard=false"
+      TZ: ${TZ:-UTC}
+    volumes:
+      - jenkins_home:/var/jenkins_home
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - devtools-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/login || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+
+  # Homarr - Dashboard for all services
+  homarr:
+    image: ghcr.io/ajnart/homarr:latest
+    container_name: homarr
+    environment:
+      TZ: ${TZ:-UTC}
+    volumes:
+      - homarr_configs:/app/data/configs
+      - homarr_icons:/app/public/icons
+      - homarr_data:/data
+    networks:
+      - devtools-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:7575"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+# Named volumes for data persistence
+volumes:
+  caddy_data:
+    driver: local
+  caddy_config:
+    driver: local
+  gitlab_config:
+    driver: local
+  gitlab_logs:
+    driver: local
+  gitlab_data:
+    driver: local
+  portainer_data:
+    driver: local
+  harbor_db:
+    driver: local
+  harbor_redis:
+    driver: local
+  harbor_registry:
+    driver: local
+  harbor_core:
+    driver: local
+  harbor_job_logs:
+    driver: local
+  harbor_trivy:
+    driver: local
+  nextcloud_db:
+    driver: local
+  nextcloud_redis:
+    driver: local
+  nextcloud_data:
+    driver: local
+  nextcloud_apps:
+    driver: local
+  nextcloud_config:
+    driver: local
+  mosquitto_data:
+    driver: local
+  mosquitto_logs:
+    driver: local
+  mosquitto_passwd:
+    driver: local
+  n8n_data:
+    driver: local
+  n8n_files:
+    driver: local
+  jenkins_home:
+    driver: local
+  homarr_configs:
+    driver: local
+  homarr_icons:
+    driver: local
+  homarr_data:
+    driver: local
+
+# Custom network for all services
+networks:
+  devtools-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${DOCKER_SUBNET:-172.28.0.0/16}

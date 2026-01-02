@@ -1,0 +1,32 @@
+# Docker volumes and data
+caddy/data/
+caddy/config/
+
+# Harbor sensitive files (generated at runtime by Caddy)
+harbor/config/core/private_key.pem
+harbor/config/core/secretkey
+harbor/config/core/certificates/
+harbor/config/registry/root.crt
+
+# Generated dashboard (created from template at runtime)
+caddy/dashboard/index.html
+
+# Backup files
+*.tar.gz
+*.zip
+backups/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment files with secrets
+.env
+.env.local
+.env.production
